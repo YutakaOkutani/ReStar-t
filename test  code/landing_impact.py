@@ -1,4 +1,4 @@
-import pigpio  # RPi.GPIOの代わりにpigpioをインポート
+import pigpio
 import time
 import datetime
 import csv
@@ -7,7 +7,7 @@ import serial
 import pynmea2
 import os
 
-# 既存のライブラリはそのまま使用
+
 from library import BNO055 as bno055
 from library import BMP180 as bmp180
 
@@ -19,7 +19,7 @@ LOG_DIRECTORY = "/home/raspberry/log/landing_impact/"
 pi = None
 
 # --- センサーの初期化 ---
-# landing_impact.py内の既存のsetup_sensors関数と、これを丸ごと入れ替える
+
 
 def setup_sensors(pi):
     """各センサーのセットアップを行う"""
@@ -68,7 +68,7 @@ def setup_sensors(pi):
     return bno, bmp, gps_serial
 
 # --- データ取得関数 ---
-# landing_impact.py内のget_all_data関数と、これを丸ごと入れ替える
+
 
 def get_all_data(bno, bmp, gps_serial):
     """全てのセンサーからデータを取得し、辞書形式で返す（デバッグ強化版）"""
@@ -105,7 +105,7 @@ def get_all_data(bno, bmp, gps_serial):
             print(f"  [BMP180] データ取得エラー: {e}")
 
     # GPSのデータ取得
-    # --- ▼ここが重要な改善点▼ ---
+    
     if gps_serial:
         try:
             # 短時間（例：0.5秒間）だけGPSデータを探すループを実行する
