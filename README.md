@@ -27,11 +27,13 @@
 ```bash
 sudo apt-get update
 sudo apt-get upgrade
+sudo reboot -h now
 ```
 
 ## 1. raspi-configからI2CとSerialを有効化する
 ```bash
-raspi-config
+sudo raspi-config
+sudo reboot -h now
 ```
 
 ## 2. リポジトリをクローンする
