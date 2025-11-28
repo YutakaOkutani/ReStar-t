@@ -1,234 +1,313 @@
-import pigpio
-import time
-import datetime
 import csv
+import datetime
 import math
-import serial
-import pynmea2
 import os
+import time
+import traceback
 
+import pynmea2
+import serial
 
 from library import BNO055 as bno055
 from library import BMP180 as bmp180
 
-# --- ユーザー設定項目 ---
 SERIAL_PORT = "/dev/serial0"
+BAUD_RATE = 115200
 LOG_DIRECTORY = "/home/raspberry/log/landing_impact/"
-
-# --- pigpioインスタンス (グローバル) ---
-pi = None
-
-# --- センサーの初期化 ---
+GPS_READ_TIMEOUT = 0.5
 
 
-def setup_sensors(pi):
-    """各センサーのセットアップを行う"""
+def setup_sensors():
+    """Initialize sensors and GPS serial connection."""
     bno = None
     bmp = None
     gps_serial = None
 
-    print("BNO055をセットアップ中...")
+    print("Initializing BNO055...")
     try:
-        bno = bno055.BNO055(pi)
+        bno = bno055.BNO055()
         if not bno.setUp():
-            print("!!! BNO055.setUp() がFalseを返しました。")
+            print("BNO055 setup returned False; disabling sensor.")
             bno = None
         else:
-            print("BNO055のセットアップ完了。")
-    except Exception as e:
-        print(f"!!! BNO055の初期化中に致命的なエラーが発生: {e} !!!")
-        import traceback
+            print("BNO055 ready.")
+    except Exception:
+        print("Failed to initialize BNO055.")
         traceback.print_exc()
         bno = None
 
-    print("BMP180をセットアップ中...")
+    print("Initializing BMP180...")
     try:
-        bmp = bmp180.BMP180(pi)
+        bmp = bmp180.BMP180()
         if not bmp.setUp():
-            # このメッセージが表示される場合、ライブラリ内のprint文で原因が出力されているはず
-            print("!!! BMP180.setUp()がFalseを返しました。上記ライブラリ出力を確認してください。!!!")
+            print("BMP180 setup returned False; disabling sensor.")
             bmp = None
         else:
             temp = bmp.getTemperature()
-            print(f"BMP180のセットアップ完了。現在の温度: {temp:.2f}C")
-    except Exception as e:
-        # このメッセージが表示される場合、ライブラリの初期化自体で例外が発生している
-        print(f"!!! BMP180の初期化中に致命的なエラーが発生しました: {e} !!!")
-        import traceback
+            print(f"BMP180 ready. Current temperature: {temp:.2f} C")
+    except Exception:
+        print("Failed to initialize BMP180.")
         traceback.print_exc()
         bmp = None
 
-    print("GPSをセットアップ中...")
+    print("Opening GPS serial port...")
     try:
-        gps_serial = serial.Serial(SERIAL_PORT, 115200, timeout=1.0)
-        print("GPSのセットアップ完了。")
-    except Exception as e:
-        print(f"GPSのシリアルポート({SERIAL_PORT})を開けませんでした: {e}")
+        gps_serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1.0)
+        print("GPS serial ready.")
+    except Exception as exc:
+        print(f"Could not open GPS serial port {SERIAL_PORT}: {exc}")
+        gps_serial = None
 
     return bno, bmp, gps_serial
 
-# --- データ取得関数 ---
 
-
-def get_all_data(bno, bmp, gps_serial):
-    """全てのセンサーからデータを取得し、辞書形式で返す（デバッグ強化版）"""
+def get_inertial_data(bno):
+    """Read accelerometer, gyro, and magnetometer data."""
     data = {
-        'acc_x': 0.0, 'acc_y': 0.0, 'acc_z': 0.0, 'acc_combined': 0.0, 'gyro_x': 0.0,
-        'gyro_y': 0.0, 'gyro_z': 0.0, 'mag_x': 0.0, 'mag_y': 0.0, 'mag_z': 0.0,
-        'temp': 0.0, 'pressure': 0.0, 'altitude_bmp': 0.0, 'latitude': 0.0,
-        'longitude': 0.0, 'altitude_gps': 0.0, 'num_sats': 0, 'gps_timestamp': '00:00:00'
+        "acc_x": 0.0,
+        "acc_y": 0.0,
+        "acc_z": 0.0,
+        "acc_combined": 0.0,
+        "gyro_x": 0.0,
+        "gyro_y": 0.0,
+        "gyro_z": 0.0,
+        "mag_x": 0.0,
+        "mag_y": 0.0,
+        "mag_z": 0.0,
     }
 
-    # BNO055のデータ取得
-    if bno:
-        try:
-            acc = bno.getAcc()
-            data.update({'acc_x': acc[0], 'acc_y': acc[1], 'acc_z': acc[2],
-                        'acc_combined': math.sqrt(acc[0]**2 + acc[1]**2 + acc[2]**2)})
-            gyro = bno.getGyro()
-            data.update({'gyro_x': gyro[0], 'gyro_y': gyro[1], 'gyro_z': gyro[2]})
-            mag = bno.getMag()
-            data.update({'mag_x': mag[0], 'mag_y': mag[1], 'mag_z': mag[2]})
-        except Exception as e:
-            print(f"  [BNO055] データ取得中にエラーが発生: {e}")
+    if not bno:
+        return data
 
-    # BMP180のデータ取得
-    if bmp:
-        try:
-            # ★★★★★ ここが修正点 ★★★★★
-            # 'bmp.temperature' のような属性アクセスではなく、
-            # 我々が定義した 'bmp.getTemperature()' のようなメソッドを呼び出す
-            data.update({'temp': bmp.getTemperature(), 
-                        'pressure': bmp.getPressure(), 
-                        'altitude_bmp': bmp.getAltitude()})
-        except Exception as e:
-            print(f"  [BMP180] データ取得エラー: {e}")
+    try:
+        acc = bno.getAcc()
+        data.update(
+            {
+                "acc_x": acc[0],
+                "acc_y": acc[1],
+                "acc_z": acc[2],
+                "acc_combined": math.sqrt(acc[0] ** 2 + acc[1] ** 2 + acc[2] ** 2),
+            }
+        )
+    except Exception:
+        print("[BNO055] Failed to read acceleration.")
 
-    # GPSのデータ取得
-    
-    if gps_serial:
-        try:
-            # 短時間（例：0.5秒間）だけGPSデータを探すループを実行する
-            search_start_time = time.time()
-            while time.time() - search_start_time < 0.5:
-                line = gps_serial.readline().decode('utf-8', errors='ignore')
-                
-                # 目的の$GPGGAまたは$GNGGAでなければ、すぐに次の行を試しに行く
-                if not (line.startswith('$GPGGA') or line.startswith('$GNGGA')):
-                    continue
-                
-                msg = pynmea2.parse(line)
-                
-                # is_validで測位が成功しているかを確認
-                if msg.is_valid:
-                    data.update({
-                        'latitude': msg.latitude, 'longitude': msg.longitude,
-                        'altitude_gps': msg.altitude, 'num_sats': int(msg.num_sats),
-                        'gps_timestamp': msg.timestamp.strftime('%H:%M:%S')
-                    })
-                    # ★成功したら、すぐに探索ループを抜ける
-                    break
-        except Exception as e:
-            print(f"  [GPS] データ処理エラー: {e}")
+    try:
+        gyro = bno.getGyro()
+        data.update({"gyro_x": gyro[0], "gyro_y": gyro[1], "gyro_z": gyro[2]})
+    except Exception:
+        print("[BNO055] Failed to read gyro.")
+
+    try:
+        mag = bno.getMag()
+        data.update({"mag_x": mag[0], "mag_y": mag[1], "mag_z": mag[2]})
+    except Exception:
+        print("[BNO055] Failed to read magnetometer.")
 
     return data
 
 
-# --- メイン処理 ---
-if __name__ == "__main__":
-    # --- pigpioの初期化 ---
-    print("pigpioデーモンに接続しています...")
-    pi = pigpio.pi()
-    if not pi.connected:
-        print("pigpioデーモンに接続できませんでした。プログラムを終了します。")
-        print("解決策: 'sudo pigpiod' を実行してください。")
-        exit()
-    print("pigpioの接続が完了しました。")
+def get_environment_data(bmp):
+    """Read temperature, pressure, and altitude from BMP180."""
+    data = {"temp": 0.0, "pressure": 0.0, "altitude_bmp": 0.0}
 
-    bno, bmp, gps_serial = setup_sensors(pi)
+    if not bmp:
+        return data
+
+    try:
+        data.update(
+            {
+                "temp": bmp.getTemperature(),
+                "pressure": bmp.getPressure(),
+                "altitude_bmp": bmp.getAltitude(),
+            }
+        )
+    except Exception:
+        print("[BMP180] Failed to read data.")
+
+    return data
+
+
+def parse_gga_line(line):
+    """Parse a GGA sentence using pynmea2 and return a dict when valid."""
+    try:
+        message = pynmea2.parse(line)
+    except pynmea2.ParseError:
+        return None
+    except Exception:
+        print("[GPS] Unexpected parse error.")
+        traceback.print_exc()
+        return None
+
+    if not isinstance(message, pynmea2.types.talker.GGA):
+        return None
+
+    # gps_qual == 0 means invalid fix
+    if getattr(message, "gps_qual", 0) in (None, 0):
+        return None
+
+    if not message.latitude or not message.longitude:
+        return None
+
+    timestamp = "00:00:00"
+    try:
+        if message.timestamp:
+            timestamp = message.timestamp.strftime("%H:%M:%S")
+    except Exception:
+        timestamp = "00:00:00"
+
+    try:
+        altitude = float(message.altitude) if message.altitude else 0.0
+    except Exception:
+        altitude = 0.0
+
+    try:
+        num_sats = int(message.num_sats) if message.num_sats else 0
+    except Exception:
+        num_sats = 0
+
+    return {
+        "latitude": message.latitude,
+        "longitude": message.longitude,
+        "altitude_gps": altitude,
+        "num_sats": num_sats,
+        "gps_timestamp": timestamp,
+    }
+
+
+def read_gps_fix(gps_serial, timeout=GPS_READ_TIMEOUT):
+    """Read GPS data for up to `timeout` seconds and return the first valid fix."""
+    if not gps_serial:
+        return None
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            line = gps_serial.readline().decode("utf-8", errors="ignore")
+        except Exception:
+            print("[GPS] Failed to read line.")
+            return None
+
+        if not line.startswith(("$GPGGA", "$GNGGA")):
+            continue
+
+        gps_data = parse_gga_line(line)
+        if gps_data:
+            return gps_data
+
+    return None
+
+
+def ensure_log_file(file_path, header):
+    os.makedirs(LOG_DIRECTORY, exist_ok=True)
+    with open(file_path, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(header)
+
+
+def main():
+    bno, bmp, gps_serial = setup_sensors()
     if not any([bno, bmp, gps_serial]):
-        print("全てのセンサーの初期化に失敗しました。プログラムを終了します。")
-        pi.stop() # pigpioリソースを解放
-        exit()
-
-    print("\nセンサーの安定を待っています..."); time.sleep(1)
-    print("データ取得を開始します。Ctrl+Cで停止します。\n")
+        print("All sensors failed to initialize; exiting.")
+        return
 
     now_time = datetime.datetime.now()
-    file_name = f"{LOG_DIRECTORY}impact_log_{now_time.strftime('%Y%m%d_%H%M%S')}.csv"
-    header = ['Time[s]', 'Acc_X[m/s^2]', 'Acc_Y[m/s^2]', 'Acc_Z[m/s^2]', 'Acc_Combined[m/s^2]', 'Gyro_X[dps]', 'Gyro_Y[dps]', 'Gyro_Z[dps]', 'Mag_X[uT]', 'Mag_Y[uT]', 'Mag_Z[uT]', 'Temp[C]', 'Pressure[hPa]', 'Altitude_BMP[m]', 'Latitude', 'Longitude', 'Altitude_GPS[m]', 'Num_Satellites', 'GPS_Timestamp']
-    
+    file_name = os.path.join(
+        LOG_DIRECTORY, f"impact_log_{now_time.strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+
+    header = [
+        "Time[s]",
+        "Acc_X[m/s^2]",
+        "Acc_Y[m/s^2]",
+        "Acc_Z[m/s^2]",
+        "Acc_Combined[m/s^2]",
+        "Gyro_X[dps]",
+        "Gyro_Y[dps]",
+        "Gyro_Z[dps]",
+        "Mag_X[uT]",
+        "Mag_Y[uT]",
+        "Mag_Z[uT]",
+        "Temp[C]",
+        "Pressure[hPa]",
+        "Altitude_BMP[m]",
+        "Latitude",
+        "Longitude",
+        "Altitude_GPS[m]",
+        "Num_Satellites",
+        "GPS_Timestamp",
+    ]
+
     try:
-        os.makedirs(LOG_DIRECTORY, exist_ok=True)
-        with open(file_name, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-    except IOError as e:
-        print(f"ログファイルの初期化に失敗しました: {e}")
-        pi.stop()
-        exit()
+        ensure_log_file(file_name, header)
+    except IOError as exc:
+        print(f"Failed to create log file: {exc}")
+        return
 
     start_time = time.time()
     last_gps_data = {}
     loop_count = 0
+
     try:
-        while True:
-            loop_count += 1
-            elapsed_time = time.time() - start_time
-            print(f"--- ループ: {loop_count} | 経過時間: {elapsed_time:.2f}s ---")
-            
-            # データ取得関数のデバッグプリントを簡略化
-            sensor_data = get_all_data(bno, bmp, gps_serial)
+        with open(file_name, "a", newline="") as file:
+            writer = csv.writer(file)
 
-            print(f"  [BNO055] Acc_Combined: {sensor_data['acc_combined']:.3f}")
-            if bmp: print(f"  [BMP180] Temp: {sensor_data['temp']:.2f}, Press: {sensor_data['pressure']:.2f}")
-            else: print("  [BMP180] スキップ（初期化失敗）")
+            while True:
+                loop_count += 1
+                elapsed_time = time.time() - start_time
 
-            if sensor_data['latitude'] != 0.0:
-                last_gps_data = {k: v for k, v in sensor_data.items() if k in ['latitude', 'longitude', 'altitude_gps', 'num_sats', 'gps_timestamp']}
-                print(f"  [GPS]    データ更新 -> 衛星数: {last_gps_data['num_sats']}, 緯度: {last_gps_data['latitude']:.4f}")
-            else:
-                print("  [GPS]    有効なデータなし")
-            
-            merged_data = {**sensor_data, **last_gps_data}
-            row_data = [f"{elapsed_time:.3f}", 
-                        f"{merged_data.get('acc_x', 0):.4f}", f"{merged_data.get('acc_y', 0):.4f}", f"{merged_data.get('acc_z', 0):.4f}", 
-                        f"{merged_data.get('acc_combined', 0):.4f}", f"{merged_data.get('gyro_x', 0):.4f}", f"{merged_data.get('gyro_y', 0):.4f}", f"{merged_data.get('gyro_z', 0):.4f}", 
-                        f"{merged_data.get('mag_x', 0):.4f}", f"{merged_data.get('mag_y', 0):.4f}", f"{merged_data.get('mag_z', 0):.4f}", 
-                        f"{merged_data.get('temp', 0):.2f}", f"{merged_data.get('pressure', 0):.2f}", f"{merged_data.get('altitude_bmp', 0):.2f}", 
-                        f"{merged_data.get('latitude', 0):.6f}", f"{merged_data.get('longitude', 0):.6f}", 
-                        f"{merged_data.get('altitude_gps', 0)}", merged_data.get('num_sats', 0), merged_data.get('gps_timestamp', '00:00:00')]
-            
-            try:
-                with open(file_name, 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(row_data)
-                print(f"  [CSV]    ファイルへの書き込み完了")
-            except IOError as e:
-                print(f"  [CSV]    ファイル書き込みエラー: {e}")
-            
-            print("-" * (len(str(loop_count)) + 28) + "\n") # 表示の調整
-            # time.sleep(0.2)
+                inertial = get_inertial_data(bno)
+                environment = get_environment_data(bmp)
+                gps_data = read_gps_fix(gps_serial)
 
+                if gps_data:
+                    last_gps_data = gps_data
+
+                merged = {**inertial, **environment, **last_gps_data}
+
+                row_data = [
+                    f"{elapsed_time:.3f}",
+                    f"{merged.get('acc_x', 0.0):.4f}",
+                    f"{merged.get('acc_y', 0.0):.4f}",
+                    f"{merged.get('acc_z', 0.0):.4f}",
+                    f"{merged.get('acc_combined', 0.0):.4f}",
+                    f"{merged.get('gyro_x', 0.0):.4f}",
+                    f"{merged.get('gyro_y', 0.0):.4f}",
+                    f"{merged.get('gyro_z', 0.0):.4f}",
+                    f"{merged.get('mag_x', 0.0):.4f}",
+                    f"{merged.get('mag_y', 0.0):.4f}",
+                    f"{merged.get('mag_z', 0.0):.4f}",
+                    f"{merged.get('temp', 0.0):.2f}",
+                    f"{merged.get('pressure', 0.0):.2f}",
+                    f"{merged.get('altitude_bmp', 0.0):.2f}",
+                    f"{merged.get('latitude', 0.0):.6f}",
+                    f"{merged.get('longitude', 0.0):.6f}",
+                    f"{merged.get('altitude_gps', 0.0)}",
+                    merged.get("num_sats", 0),
+                    merged.get("gps_timestamp", "00:00:00"),
+                ]
+
+                writer.writerow(row_data)
+                file.flush()
+
+                print(
+                    f"--- Loop {loop_count} | Elapsed: {elapsed_time:.2f}s | "
+                    f"Acc: {merged.get('acc_combined', 0.0):.3f} m/s^2 | "
+                    f"Temp: {merged.get('temp', 0.0):.2f} C | "
+                    f"GPS sats: {merged.get('num_sats', 0)}"
+                )
     except KeyboardInterrupt:
-        print("\n\nプログラムが中断されました。")
-    except Exception as e:
-        print(f"\n予期せぬエラーが発生しました: {e}")
+        print("\nMeasurement stopped by user.")
+    except Exception:
+        print("Unexpected error during logging.")
+        traceback.print_exc()
     finally:
-        # --- リソースの解放 ---
-        print("リソースを解放しています...")
-        if 'bno' in locals() and bno is not None:
-            del bno
-        if 'bmp' in locals() and bmp is not None:
-            del bmp
-
         if gps_serial and gps_serial.is_open:
             gps_serial.close()
-            print("  - GPSシリアルポートを閉じました。")
-        
-        # センサーオブジェクトを解放した後にpigpioの接続を閉じる
-        if pi and pi.connected:
-            pi.stop()
-            print("  - pigpioの接続を解放しました。")
+            print("Closed GPS serial port.")
 
-        print(f"ログファイル '{file_name}' の保存を完了しました。")
+        print(f"Log saved to {file_name}")
+
+
+if __name__ == "__main__":
+    main()
